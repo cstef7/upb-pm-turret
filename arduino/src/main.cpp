@@ -68,6 +68,47 @@ int serial_recv_fn(uint8_t *byte, void *ctx)
   return 0;
 }
 
+void send_sound_command(float volume)
+{
+  sound_message_t sound_msg;
+  sound_msg.command_id = 0x02; // Sound command
+  sound_msg.volume = volume;
+
+  uint8_t buffer[SOUND_MESSAGE_SIZE];
+  message_write_sound(buffer, sizeof(buffer), &sound_msg);
+
+  send_packet(buffer, sizeof(buffer), serial_send_fn, NULL);
+}
+
+typedef struct pan_tilt_t
+{
+  float pan;
+  float tilt;
+} pan_tilt_t;
+
+pan_tilt_t coords_to_pan_tilt(float x, float y)
+{
+  pan_tilt_t result;
+  // map x and y from 0-1 to 700-2300 for pan and 1400-2400 for tilt
+  result.pan = 700 + (1.0f - x) * (2300 - 700);
+  result.tilt = 1400 + (1.0f - y) * (2400 - 1400);
+  return result;
+}
+
+void set_pan_tilt(pan_tilt_t pan_tilt)
+{
+  uint16_t pan = usToOcr(static_cast<uint16_t>(pan_tilt.pan));
+  uint16_t tilt = usToOcr(static_cast<uint16_t>(pan_tilt.tilt));
+  cli();
+  OCR1A = pan;
+  OCR1B = tilt;
+  sei();
+}
+
+pan_tilt_t running_pan_tilt = {1500, 1900};
+
+#define PAN_TILT_NEW_WEIGHT 0.5f
+
 void loop()
 {
   // Read position message from UART
@@ -78,18 +119,19 @@ void loop()
   // Read into buffer, then read from buffer
   if (recv_packet(buffer, sizeof(buffer), &bytes_read, serial_recv_fn, NULL) == 0 && bytes_read == POSITION_MESSAGE_SIZE)
   {
-    digitalWrite(LED_BUILTIN, HIGH);
+    // digitalWrite(LED_BUILTIN, HIGH);
     if (message_read_position(buffer, sizeof(buffer), &pos_msg) == POSITION_MESSAGE_SIZE)
     {
       // just... sum the two coordinates and send the result as a sound command with volume = x + y
-      sound_message_t sound_msg;
-      sound_msg.command_id = 0x02; // Sound command
-      sound_msg.volume = pos_msg.x + pos_msg.y;
+      // float volume = pos_msg.x + pos_msg.y;
+      // send_sound_command(volume);
+      // toggle led
+      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 
-      uint8_t sound_buffer[SOUND_MESSAGE_SIZE];
-      message_write_sound(sound_buffer, sizeof(sound_buffer), &sound_msg);
-
-      send_packet(sound_buffer, sizeof(sound_buffer), serial_send_fn, NULL);
+      pan_tilt_t pan_tilt = coords_to_pan_tilt(pos_msg.x, pos_msg.y);
+      running_pan_tilt.pan = PAN_TILT_NEW_WEIGHT * pan_tilt.pan + (1.0f - PAN_TILT_NEW_WEIGHT) * running_pan_tilt.pan;
+      running_pan_tilt.tilt = PAN_TILT_NEW_WEIGHT * pan_tilt.tilt + (1.0f - PAN_TILT_NEW_WEIGHT) * running_pan_tilt.tilt;
+      set_pan_tilt(running_pan_tilt);
     }
   }
 

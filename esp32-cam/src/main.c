@@ -66,6 +66,23 @@ void commandReaderTask(void *pvParameters) {
     }
 }
 
+void sendPositionCommand(float x, float y) {
+    position_message_t pos_msg;
+    uint8_t buffer[POSITION_MESSAGE_SIZE];
+
+    pos_msg.command_id = 0x01;
+    pos_msg.x = x;
+    pos_msg.y = y;
+
+    int serialized_len = message_write_position(buffer, sizeof(buffer), &pos_msg);
+    if (serialized_len == POSITION_MESSAGE_SIZE) {
+        if (send_packet(buffer, serialized_len, uart_send_byte, (void*)(intptr_t)UART_NUM_1) < 0)
+            debug_tcp_printf(sock, "Failed to send position command over UART\n");
+        else
+            debug_tcp_printf(sock, "Sent position command: x=%.2f, y=%.2f\n", pos_msg.x, pos_msg.y);
+    }
+}
+
 uint8_t framebuffer1[QQVGA_HEIGHT][QQVGA_WIDTH];
 uint8_t framebuffer2[QQVGA_HEIGHT][QQVGA_WIDTH];
 
@@ -96,13 +113,13 @@ void commandWriterTask(void *pvParameters) {
                 float centroid_x = 0.0f;
                 float centroid_y = 0.0f;
 
-                int diff_count = 0;
+                float diff_count = 0;
                 int index_x = 0;
                 int index_y = 0;
                 for (size_t i = 0; i < fb->len; i++) {
                     int diff = abs(current_frame_ptr[i] - last_frame_ptr[i]);
                     if (diff > 10) {
-                        diff_count++;
+                        diff_count += diff;
                         centroid_x += index_x * diff;
                         centroid_y += index_y * diff;
                     }
@@ -113,8 +130,10 @@ void commandWriterTask(void *pvParameters) {
                     }
                 }
                 if (diff_count > 192) {
-                    centroid_x /= diff_count;
-                    centroid_y /= diff_count;
+                    centroid_x /= diff_count * QQVGA_WIDTH;
+                    centroid_y /= diff_count * QQVGA_HEIGHT;
+
+                    sendPositionCommand(centroid_x, centroid_y);
 
                     debug_tcp_printf(sock, "Centroid of motion: (%.2f, %.2f)\n", centroid_x, centroid_y);
                 }
@@ -131,26 +150,6 @@ void commandWriterTask(void *pvParameters) {
         }
 
         esp_camera_fb_return(fb);
-
-#if 0
-        position_message_t pos_msg;
-        uint8_t buffer[POSITION_MESSAGE_SIZE];
-
-        pos_msg.command_id = 0x01; // Example command ID for position
-        pos_msg.x = 1.23f; // Example X coordinate
-        pos_msg.y = 4.56f; // Example Y coordinate
-
-        int serialized_len = message_write_position(buffer, sizeof(buffer), &pos_msg);
-        if (serialized_len == POSITION_MESSAGE_SIZE) {
-            if (send_packet(buffer, serialized_len, uart_send_byte, (void*)(intptr_t)UART_NUM_1) < 0)
-                debug_tcp_printf(sock, "Failed to send position command over UART\n");
-            else
-                debug_tcp_printf(sock, "Sent position command: x=%.2f, y=%.2f\n", pos_msg.x, pos_msg.y);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Send position every 5 seconds
-#endif
-        vTaskDelay(pdMS_TO_TICKS(300));
     }
 }
 
