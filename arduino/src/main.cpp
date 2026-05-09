@@ -11,6 +11,8 @@ constexpr uint16_t TOP_FOR_PRE_FREQ(unsigned prescaler, unsigned frequency)
 constexpr uint8_t PIN_PAN_SERVO = 9;
 constexpr uint8_t PIN_TILT_SERVO = 10;
 
+constexpr uint8_t PIN_LASER = 12;
+
 constexpr uint16_t SERVO_FRAME_TOP = TOP_FOR_PRE_FREQ(8, 50);
 
 constexpr uint16_t usToOcr(uint16_t us)
@@ -33,15 +35,42 @@ void setupTimer1()
   OCR1B = usToOcr(1500); // servo on pin 10
 }
 
+void setupTimer2()
+{
+  TCCR2A = 0;
+  TCCR2B = 0;
+  TCNT2 = 0;
+
+  // Timer interrupts every 1ms
+  TCCR2A = (1 << WGM21);              // CTC mode
+  TCCR2B = (1 << CS22) | (1 << CS21); // prescaler = 256
+  OCR2A = (F_CPU / 256 / 1000) - 1;   // 1ms at 16MHz
+  TIMSK2 = (1 << OCIE2A);             // Enable Timer2 compare interrupt
+}
+
+ISR(TIMER2_COMPA_vect)
+{
+  // Toggle laser pin every 500ms
+  static uint16_t counter = 0;
+  counter++;
+  if (counter >= 500)
+  {
+    digitalWrite(PIN_LASER, !digitalRead(PIN_LASER));
+    counter = 0;
+  }
+}
+
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(PIN_PAN_SERVO, OUTPUT);
   pinMode(PIN_TILT_SERVO, OUTPUT);
+  pinMode(PIN_LASER, OUTPUT);
 
   Serial.begin(115200);
 
   setupTimer1();
+  setupTimer2();
   sei();
 }
 
@@ -119,10 +148,8 @@ void loop()
   // Read into buffer, then read from buffer
   if (recv_packet(buffer, sizeof(buffer), &bytes_read, serial_recv_fn, NULL) == 0 && bytes_read == POSITION_MESSAGE_SIZE)
   {
-    // digitalWrite(LED_BUILTIN, HIGH);
     if (message_read_position(buffer, sizeof(buffer), &pos_msg) == POSITION_MESSAGE_SIZE)
     {
-      // just... sum the two coordinates and send the result as a sound command with volume = x + y
       // float volume = pos_msg.x + pos_msg.y;
       // send_sound_command(volume);
       // toggle led
@@ -134,26 +161,4 @@ void loop()
       set_pan_tilt(running_pan_tilt);
     }
   }
-
-#if 0
-  static uint32_t current_counter = 0;
-  current_counter++;
-
-  static uint32_t last_update = 0;
-
-  if (millis() - last_update >= 20)
-  {
-    last_update = millis();
-
-    float t = current_counter * 0.00001f;
-
-    uint16_t pan = usToOcr(1500 + sin(t) * 800);
-    uint16_t tilt = usToOcr(1900 + sin(t) * 500);
-
-    cli();
-    OCR1A = pan;
-    OCR1B = tilt;
-    sei();
-  }
-#endif
 }

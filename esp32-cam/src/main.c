@@ -22,6 +22,8 @@ int sock = -1;
 #define QQVGA_HEIGHT 120
 #define GRAYSCALE_BUFFER_SIZE (QQVGA_WIDTH * QQVGA_HEIGHT)
 
+#define FRAME_WEIGHT 0.2f
+
 static int uart_send_byte(uint8_t byte, void *ctx) {
     uart_port_t uart_num = (uart_port_t)(intptr_t)ctx;
 
@@ -83,11 +85,7 @@ void sendPositionCommand(float x, float y) {
     }
 }
 
-uint8_t framebuffer1[QQVGA_HEIGHT][QQVGA_WIDTH];
-uint8_t framebuffer2[QQVGA_HEIGHT][QQVGA_WIDTH];
-
-uint8_t *last_frame_ptr = (uint8_t *)framebuffer1;
-uint8_t *current_frame_ptr = (uint8_t *)framebuffer2;
+uint8_t background[QQVGA_HEIGHT][QQVGA_WIDTH];
 int frames_captured = 0;
 
 void commandWriterTask(void *pvParameters) {
@@ -105,8 +103,8 @@ void commandWriterTask(void *pvParameters) {
         // debug_tcp_printf(sock, "Captured frame: %d bytes, format=%d\n", fb->len, fb->format);
 
         // Store grayscale frame data in allocated memory
-        if (current_frame_ptr && fb->len <= GRAYSCALE_BUFFER_SIZE) {
-            memcpy(current_frame_ptr, fb->buf, fb->len);
+        if (fb->len <= GRAYSCALE_BUFFER_SIZE) {
+            // memcpy(current_frame_ptr, fb->buf, fb->len);
             // debug_tcp_printf(sock, "Grayscale frame stored: %d bytes\n", fb->len);
 
             if (frames_captured > 0) {
@@ -117,19 +115,23 @@ void commandWriterTask(void *pvParameters) {
                 int index_x = 0;
                 int index_y = 0;
                 for (size_t i = 0; i < fb->len; i++) {
-                    int diff = abs(current_frame_ptr[i] - last_frame_ptr[i]);
+                    int diff = abs(fb->buf[i] - background[index_y][index_x]);
                     if (diff > 10) {
                         diff_count += diff;
                         centroid_x += index_x * diff;
                         centroid_y += index_y * diff;
                     }
+
+                    background[index_y][index_x] = (uint8_t)(FRAME_WEIGHT * fb->buf[i]
+                        + (1.0f - FRAME_WEIGHT) * background[index_y][index_x]);
+
                     index_x++;
                     if (index_x >= QQVGA_WIDTH) {
                         index_x = 0;
                         index_y++;
                     }
                 }
-                if (diff_count > 192) {
+                if (diff_count > 100) {
                     centroid_x /= diff_count * QQVGA_WIDTH;
                     centroid_y /= diff_count * QQVGA_HEIGHT;
 
@@ -138,15 +140,13 @@ void commandWriterTask(void *pvParameters) {
                     debug_tcp_printf(sock, "Centroid of motion: (%.2f, %.2f)\n", centroid_x, centroid_y);
                 }
                 // debug_tcp_printf(sock, "Differing pixels: %d\n", diff_count);
+            } else {
+                memcpy(background, fb->buf, fb->len);
             }
-
-            uint8_t *temp = last_frame_ptr;
-            last_frame_ptr = current_frame_ptr;
-            current_frame_ptr = temp;
 
             frames_captured++;
         } else {
-            debug_tcp_printf(sock, "Frame size exceeds buffer capacity: %d bytes and %p\n", fb->len, current_frame_ptr);
+            debug_tcp_printf(sock, "Frame size exceeds buffer capacity: %d bytes\n", fb->len);
         }
 
         esp_camera_fb_return(fb);
