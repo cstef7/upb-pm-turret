@@ -5,7 +5,11 @@
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+#include "esp_spiffs.h"
 #include "lwip/sockets.h"
+#include "driver/i2s.h"
 
 #include "debug.h"
 #include "messages.h"
@@ -16,13 +20,65 @@
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
 
-int sock = -1;
+#define I2S_SAMPLE_RATE 44100
+#define I2S_BCLK 14
+#define I2S_LRC 15
+#define I2S_DOUT 13
+
+#define I2S_PORT I2S_NUM_1
+
+#define WAV_BUFFER_SIZE 256
+#define WAV_HEADER_SIZE 44
 
 #define QQVGA_WIDTH 160
 #define QQVGA_HEIGHT 120
 #define GRAYSCALE_BUFFER_SIZE (QQVGA_WIDTH * QQVGA_HEIGHT)
 
+#define MOTION_CHANGE_FRAMES_THRESHOLD 3
+
 #define FRAME_WEIGHT 0.2f
+
+#define ms_to_us(ms) ((ms) * 1000)
+
+#define FOLLOW_TIMEOUT_US ms_to_us(3000)
+#define SEARCH_TIMEOUT_US ms_to_us(3000)
+
+int sock = -1;
+
+typedef enum state_t {
+    State_Idle,
+    State_Follow,
+    State_Search,
+    State_Shoot
+} state_t;
+
+state_t current_state = State_Idle;
+int64_t state_change_time = 0;
+
+typedef enum sound_t {
+    Sound_I_See_You,
+    Sound_Searching,
+    Sound_Target_Lost,
+    Sound_Are_You_Still_There,
+    Sound_Fire,
+
+    Sound_Count
+} sound_t;
+
+char const *const sound_filenames[] = {
+    [Sound_I_See_You] = "/spiffs/i-see-you.wav",
+    [Sound_Searching] = "/spiffs/searching.wav",
+    [Sound_Target_Lost] = "/spiffs/target-lost.wav",
+    [Sound_Are_You_Still_There] = "/spiffs/are-you-still-there.wav",
+    [Sound_Fire] = "/spiffs/fire.wav"
+};
+
+typedef struct play_sound_notif_t {
+    sound_t sound;
+    bool loop;
+} play_sound_notif_t;
+
+QueueHandle_t sound_queue;
 
 static int uart_send_byte(uint8_t byte, void *ctx) {
     uart_port_t uart_num = (uart_port_t)(intptr_t)ctx;
@@ -56,7 +112,7 @@ void commandReaderTask(void *pvParameters) {
             if (message_read_sound(buffer, sizeof(buffer), &sound_msg) == SOUND_MESSAGE_SIZE) {
                 // ESP_LOGI(TAG, "Received sound command: volume=%.2f", sound_msg.volume);
                 if (sock >= 0) {
-                    int bytes_sent = debug_tcp_printf(sock, "Received sum: %.2f\n", sound_msg.volume);
+                    debug_tcp_printf(sock, "Received sum: %.2f\n", sound_msg.volume);
                     debug_tcp_hexdump(sock, buffer, bytes_read);
                 }
             }
@@ -79,18 +135,88 @@ void sendPositionCommand(float x, float y) {
     int serialized_len = message_write_position(buffer, sizeof(buffer), &pos_msg);
     if (serialized_len == POSITION_MESSAGE_SIZE) {
         if (send_packet(buffer, serialized_len, uart_send_byte, (void*)(intptr_t)UART_NUM_1) < 0)
-            debug_tcp_printf(sock, "Failed to send position command over UART\n");
-        else
-            debug_tcp_printf(sock, "Sent position command: x=%.2f, y=%.2f\n", pos_msg.x, pos_msg.y);
+            ;
+            // debug_tcp_printf(sock, "Failed to send position command over UART\n");
+        else ;
+            // debug_tcp_printf(sock, "Sent position command: x=%.2f, y=%.2f\n", pos_msg.x, pos_msg.y);
     }
 }
 
 uint8_t background[QQVGA_HEIGHT][QQVGA_WIDTH];
 int frames_captured = 0;
+typedef struct vec2_t {
+    float x;
+    float y;
+} vec2_t;
+
+void analyze_frame(
+    const uint8_t *frame_data,
+    uint8_t background[QQVGA_HEIGHT][QQVGA_WIDTH],
+    bool *motion,
+    vec2_t *centroid
+) {
+    *motion = false;
+
+    if (frames_captured > 0) {
+        float centroid_x = 0.0f;
+        float centroid_y = 0.0f;
+
+        float diff_count = 0;
+        int index_x = 0;
+        int index_y = 0;
+        for (size_t i = 0; i < GRAYSCALE_BUFFER_SIZE; i++) {
+            int diff = abs(frame_data[i] - background[index_y][index_x]);
+            if (diff > 10) {
+                diff_count += diff;
+                centroid_x += index_x * diff;
+                centroid_y += index_y * diff;
+            }
+
+            background[index_y][index_x] = (uint8_t)(FRAME_WEIGHT * frame_data[i]
+                + (1.0f - FRAME_WEIGHT) * background[index_y][index_x]);
+
+            index_x++;
+            if (index_x >= QQVGA_WIDTH) {
+                index_x = 0;
+                index_y++;
+            }
+        }
+        if (diff_count > 100) {
+            centroid_x /= diff_count * QQVGA_WIDTH;
+            centroid_y /= diff_count * QQVGA_HEIGHT;
+
+            *motion = true;
+            centroid->x = centroid_x;
+            centroid->y = centroid_y;
+        }
+        // debug_tcp_printf(sock, "Differing pixels: %d\n", diff_count);
+    } else {
+        memcpy(background, frame_data, GRAYSCALE_BUFFER_SIZE);
+    }
+}
+
+void set_state(state_t new_state) {
+    if (current_state != new_state) {
+        current_state = new_state;
+        state_change_time = esp_timer_get_time();
+        debug_tcp_printf(sock, "State changed to: %d\n", current_state);
+    }
+}
+
+void play_sound(sound_t sound, bool loop) {
+    play_sound_notif_t notif = {
+        .sound = sound,
+        .loop = loop
+    };
+    xQueueReset(sound_queue);
+    xQueueSend(sound_queue, &notif, 0);
+}
 
 void commandWriterTask(void *pvParameters) {
+    int motion_frames = 0;
+    int no_motion_frames = 0;
+
     while (1) {
-        // ESP_LOGI("MEM", "free heap: %d", esp_get_free_heap_size());
         // debug_tcp_printf(sock, "Capturing frame %d...\n", frames_captured + 1);
 
         camera_fb_t *fb = esp_camera_fb_get();
@@ -103,45 +229,36 @@ void commandWriterTask(void *pvParameters) {
         // debug_tcp_printf(sock, "Captured frame: %d bytes, format=%d\n", fb->len, fb->format);
 
         // Store grayscale frame data in allocated memory
-        if (fb->len <= GRAYSCALE_BUFFER_SIZE) {
+        if (fb->len == GRAYSCALE_BUFFER_SIZE) {
             // memcpy(current_frame_ptr, fb->buf, fb->len);
             // debug_tcp_printf(sock, "Grayscale frame stored: %d bytes\n", fb->len);
+            bool motion_detected = false;
+            vec2_t centroid = {0.0f, 0.0f};
+            analyze_frame(fb->buf, background, &motion_detected, &centroid);
+            
+            if (motion_detected) {
+                motion_frames++;
+                no_motion_frames = 0;
 
-            if (frames_captured > 0) {
-                float centroid_x = 0.0f;
-                float centroid_y = 0.0f;
+                sendPositionCommand(centroid.x, centroid.y);
+                // debug_tcp_printf(sock, "Centroid of motion: (%.2f, %.2f)\n", centroid.x, centroid.y);
 
-                float diff_count = 0;
-                int index_x = 0;
-                int index_y = 0;
-                for (size_t i = 0; i < fb->len; i++) {
-                    int diff = abs(fb->buf[i] - background[index_y][index_x]);
-                    if (diff > 10) {
-                        diff_count += diff;
-                        centroid_x += index_x * diff;
-                        centroid_y += index_y * diff;
-                    }
-
-                    background[index_y][index_x] = (uint8_t)(FRAME_WEIGHT * fb->buf[i]
-                        + (1.0f - FRAME_WEIGHT) * background[index_y][index_x]);
-
-                    index_x++;
-                    if (index_x >= QQVGA_WIDTH) {
-                        index_x = 0;
-                        index_y++;
-                    }
+                if (motion_frames > MOTION_CHANGE_FRAMES_THRESHOLD
+                    && (current_state == State_Idle || current_state == State_Search)
+                ) {
+                    set_state(State_Follow);
+                    play_sound(Sound_I_See_You, false);
                 }
-                if (diff_count > 100) {
-                    centroid_x /= diff_count * QQVGA_WIDTH;
-                    centroid_y /= diff_count * QQVGA_HEIGHT;
-
-                    sendPositionCommand(centroid_x, centroid_y);
-
-                    debug_tcp_printf(sock, "Centroid of motion: (%.2f, %.2f)\n", centroid_x, centroid_y);
-                }
-                // debug_tcp_printf(sock, "Differing pixels: %d\n", diff_count);
             } else {
-                memcpy(background, fb->buf, fb->len);
+                motion_frames = 0;
+                no_motion_frames++;
+
+                if (no_motion_frames > MOTION_CHANGE_FRAMES_THRESHOLD
+                    && (current_state == State_Follow || current_state == State_Shoot)
+                ) {
+                    set_state(State_Search);
+                    play_sound(Sound_Searching, false);
+                }
             }
 
             frames_captured++;
@@ -150,6 +267,105 @@ void commandWriterTask(void *pvParameters) {
         }
 
         esp_camera_fb_return(fb);
+
+        int64_t now = esp_timer_get_time();
+        if (current_state == State_Follow && now - state_change_time > FOLLOW_TIMEOUT_US) {
+            set_state(State_Shoot);
+            play_sound(Sound_Fire, true);
+        } else if (current_state == State_Search && now - state_change_time > SEARCH_TIMEOUT_US) {
+            set_state(State_Idle);
+            play_sound(Sound_Target_Lost, false);
+        }
+    }
+}
+
+FILE *get_wav_handle(sound_t sound) {
+    FILE *file = fopen(sound_filenames[sound], "rb");
+
+    if (!file) {
+        debug_tcp_printf(sock, "Failed to open sound file\n");
+        return NULL;
+    }
+
+    if (fseek(file, WAV_HEADER_SIZE, SEEK_SET) != 0) {
+        debug_tcp_printf(sock, "Failed to seek sound file\n");
+        fclose(file);
+        return NULL;
+    }
+
+    return file;
+}
+
+void soundPlayerTask(void *pvParameters) {
+    play_sound_notif_t notif;
+    bool has_sound = false;
+    FILE *file = NULL;
+    uint8_t buffer[WAV_BUFFER_SIZE];
+
+    while (1) {
+        if (!has_sound) {
+            xQueueReceive(sound_queue, &notif, portMAX_DELAY);
+            file = get_wav_handle(notif.sound);
+            has_sound = true;
+        }
+
+        // stream bit here
+        size_t bytes_read = fread(buffer, 1, sizeof(buffer), file);
+
+        for (size_t i = 0; i + 1 < bytes_read; i += 2)
+        {
+            uint16_t unscaled = buffer[i] | (buffer[i + 1] << 8U);
+            int32_t sample = unscaled > 32767 ? (int32_t)unscaled - 65536 : unscaled;
+            int32_t scaled = sample * 20 /* TODO replace with sound volume */ / 100;
+
+            // Clamp to int16_t range
+            if (scaled > 32767)
+                scaled = 32767;
+            if (scaled < -32768)
+                scaled = -32768;
+
+            buffer[i] = scaled & 0xFF;
+            buffer[i + 1] = (scaled >> 8) & 0xFF;
+        }
+
+        if (bytes_read == 0) {
+            if (notif.loop) {
+                fseek(file, WAV_HEADER_SIZE, SEEK_SET);
+                continue;
+            } else {
+                fclose(file);
+                has_sound = false;
+                continue;
+            }
+        } else {
+            size_t total_written = 0;
+
+            while (total_written < bytes_read) {
+                size_t written = 0;
+
+                esp_err_t err = i2s_write(
+                    I2S_PORT,
+                    buffer + total_written,
+                    bytes_read - total_written,
+                    &written,
+                    portMAX_DELAY
+                );
+
+                if (err != ESP_OK) {
+                    debug_tcp_printf(sock, "Failed to write to I2S\n");
+                    break;
+                }
+
+                total_written += written;
+            }
+        }
+
+        play_sound_notif_t new_notif;
+        if (xQueueReceive(sound_queue, &new_notif, 0)) {
+            notif = new_notif;
+            file = get_wav_handle(notif.sound);
+            has_sound = true;
+        }
     }
 }
 
@@ -211,20 +427,86 @@ void start_uart()
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_1, 2048, 0, 0, NULL, 0));
 }
 
+void start_spiffs() {
+    esp_vfs_spiffs_conf_t conf = {
+      .base_path = "/spiffs",
+      .partition_label = NULL,
+      .max_files = 5,
+      .format_if_mount_failed = true
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            debug_tcp_printf(sock, "Failed to mount or format filesystem\n");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            debug_tcp_printf(sock, "Failed to find SPIFFS partition\n");
+        } else {
+            debug_tcp_printf(sock, "Failed to initialize SPIFFS (%s)\n", esp_err_to_name(ret));
+        }
+        return;
+    }
+
+    size_t total = 0;
+    size_t used = 0;
+
+    ESP_ERROR_CHECK(
+        esp_spiffs_info(NULL, &total, &used)
+    );
+
+    debug_tcp_printf(sock, "SPIFFS mounted");
+    debug_tcp_printf(sock, "Partition size: total=%u used=%u",
+             (unsigned)total,
+             (unsigned)used);
+}
+
+void start_i2s(uint32_t sampleRate)
+{
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+        .sample_rate = sampleRate,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 64,
+        .use_apll = true,
+        .tx_desc_auto_clear = true,
+        .fixed_mclk = 0
+        };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCLK,
+        .ws_io_num = I2S_LRC,
+        .data_out_num = I2S_DOUT,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
+
+    ESP_ERROR_CHECK(i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL));
+    ESP_ERROR_CHECK(i2s_set_pin(I2S_PORT, &pin_config));
+}
+
 void app_main() {
-    // ESP_ERROR_CHECK(debug_network_init());
+    ESP_ERROR_CHECK(debug_network_init());
 
     start_uart();
     start_camera();
+    start_spiffs();
+    start_i2s(I2S_SAMPLE_RATE);
 
-    // while (sock < 0) {
-    //     sock = debug_tcp_connect();
-    //     if (sock < 0)
-    //         vTaskDelay(pdMS_TO_TICKS(2000));
-    // }
+    sound_queue = xQueueCreate(4, sizeof(play_sound_notif_t));
+
+    while (sock < 0) {
+        sock = debug_tcp_connect();
+        if (sock < 0)
+            vTaskDelay(pdMS_TO_TICKS(2000));
+    }
 
     // xTaskCreate(commandReaderTask, "command_reader", 4096, NULL, 5, NULL);
     xTaskCreate(commandWriterTask, "command_writer", 4096, NULL, 5, NULL);
+    xTaskCreate(soundPlayerTask, "sound_player", 4096, NULL, 5, NULL);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
