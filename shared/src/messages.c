@@ -34,6 +34,9 @@ int message_read_sound(const uint8_t *buffer, size_t len, sound_message_t *msg) 
     if (crc8_compute(buffer, SOUND_MESSAGE_SIZE - 1) != buffer[SOUND_MESSAGE_SIZE - 1])
         return -1;
 
+    if (buffer[0] != VOLUME_COMMAND_ID)
+        return -1;
+
     msg->command_id = buffer[0];
     memcpy(&msg->volume, &buffer[1], sizeof(float));
 
@@ -58,10 +61,38 @@ int message_read_position(const uint8_t *buffer, size_t len, position_message_t 
 
     if (crc8_compute(buffer, POSITION_MESSAGE_SIZE - 1) != buffer[POSITION_MESSAGE_SIZE - 1])
         return -1;
+    
+    if (buffer[0] != POSITION_COMMAND_ID)
+        return -1;
 
     msg->command_id = buffer[0];
     memcpy(&msg->x, &buffer[1], sizeof(float));
     memcpy(&msg->y, &buffer[5], sizeof(float));
 
     return POSITION_MESSAGE_SIZE;
+}
+
+int message_write_light(uint8_t *buffer, size_t max_len, const light_message_t *msg) {
+    if (!buffer || !msg || max_len < LIGHT_MESSAGE_SIZE)
+        return -1;
+
+    buffer[0] = msg->command_id;
+    buffer[1] = crc8_compute(buffer, LIGHT_MESSAGE_SIZE - 1);
+
+    return LIGHT_MESSAGE_SIZE;
+}
+
+int message_read_light(const uint8_t *buffer, size_t len, light_message_t *msg) {
+    if (!buffer || !msg || len < LIGHT_MESSAGE_SIZE)
+        return -1;
+
+    if (crc8_compute(buffer, LIGHT_MESSAGE_SIZE - 1) != buffer[LIGHT_MESSAGE_SIZE - 1])
+        return -1;
+
+    if (!(buffer[0] == LIGHT_COMMAND_ID || buffer[0] == LASER_ON_COMMAND_ID || buffer[0] == LASER_OFF_COMMAND_ID))
+        return -1;
+
+    msg->command_id = buffer[0];
+
+    return LIGHT_MESSAGE_SIZE;
 }

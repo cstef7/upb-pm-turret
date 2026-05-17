@@ -86,3 +86,51 @@ int recv_packet(uint8_t *buffer,
             buffer[received++] = byte;
     }
 }
+
+int recv_packet_step(uint8_t *buffer,
+                     size_t buffer_len,
+                     size_t *received_len,
+                     slip_recv_state_t *state,
+                     slip_recv_fn recv_fn,
+                     void *ctx)
+{
+    uint8_t byte;
+
+    while (recv_fn(&byte, ctx) == 0)
+    {
+        if (state->escaping)
+        {
+            state->escaping = false;
+
+            if (byte == ESC_END)
+                byte = END;
+            else if (byte == ESC_ESC)
+                byte = ESC;
+        }
+        else
+        {
+            if (byte == END)
+            {
+                if (state->received > 0)
+                {
+                    *received_len = state->received;
+                    state->received = 0;
+                    return 0;
+                }
+
+                continue;
+            }
+
+            if (byte == ESC)
+            {
+                state->escaping = true;
+                continue;
+            }
+        }
+
+        if (state->received < buffer_len)
+            buffer[state->received++] = byte;
+    }
+
+    return 1; // incomplete packet
+}

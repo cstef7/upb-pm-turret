@@ -43,6 +43,8 @@
 #define FOLLOW_TIMEOUT_US ms_to_us(3000)
 #define SEARCH_TIMEOUT_US ms_to_us(3000)
 
+#define MAX_VOLUME .2f
+
 int sock = -1;
 
 typedef enum state_t {
@@ -65,6 +67,8 @@ typedef enum sound_t {
     Sound_Count
 } sound_t;
 
+volatile float current_volume = 1.0f;
+
 char const *const sound_filenames[] = {
     [Sound_I_See_You] = "/spiffs/i-see-you.wav",
     [Sound_Searching] = "/spiffs/searching.wav",
@@ -73,12 +77,26 @@ char const *const sound_filenames[] = {
     [Sound_Fire] = "/spiffs/fire.wav"
 };
 
+float const sound_volumes[] = {
+    [Sound_I_See_You] = 1.0f,
+    [Sound_Searching] = 1.0f,
+    [Sound_Target_Lost] = 1.0f,
+    [Sound_Are_You_Still_There] = 1.0f,
+    [Sound_Fire] = 1.7f
+};
+
 typedef struct play_sound_notif_t {
     sound_t sound;
     bool loop;
 } play_sound_notif_t;
 
 QueueHandle_t sound_queue;
+
+typedef struct send_light_notif_t {
+    uint8_t dummy;
+} send_light_notif_t;
+
+QueueHandle_t light_queue;
 
 static int uart_send_byte(uint8_t byte, void *ctx) {
     uart_port_t uart_num = (uart_port_t)(intptr_t)ctx;
@@ -111,8 +129,9 @@ void commandReaderTask(void *pvParameters) {
         if (bytes_read == SOUND_MESSAGE_SIZE) {
             if (message_read_sound(buffer, sizeof(buffer), &sound_msg) == SOUND_MESSAGE_SIZE) {
                 // ESP_LOGI(TAG, "Received sound command: volume=%.2f", sound_msg.volume);
+                current_volume = sound_msg.volume;
                 if (sock >= 0) {
-                    debug_tcp_printf(sock, "Received sum: %.2f\n", sound_msg.volume);
+                    debug_tcp_printf(sock, "Received volume: %.2f\n", sound_msg.volume);
                     debug_tcp_hexdump(sock, buffer, bytes_read);
                 }
             }
@@ -128,7 +147,7 @@ void sendPositionCommand(float x, float y) {
     position_message_t pos_msg;
     uint8_t buffer[POSITION_MESSAGE_SIZE];
 
-    pos_msg.command_id = 0x01;
+    pos_msg.command_id = POSITION_COMMAND_ID;
     pos_msg.x = x;
     pos_msg.y = y;
 
@@ -139,6 +158,20 @@ void sendPositionCommand(float x, float y) {
             // debug_tcp_printf(sock, "Failed to send position command over UART\n");
         else ;
             // debug_tcp_printf(sock, "Sent position command: x=%.2f, y=%.2f\n", pos_msg.x, pos_msg.y);
+    }
+}
+
+void sendLightCommand(uint8_t command_id) {
+    light_message_t light_msg;
+    uint8_t buffer[LIGHT_MESSAGE_SIZE];
+    light_msg.command_id = command_id;
+    int serialized_len = message_write_light(buffer, sizeof(buffer), &light_msg);
+    if (serialized_len == LIGHT_MESSAGE_SIZE) {
+        if (send_packet(buffer, serialized_len, uart_send_byte, (void*)(intptr_t)UART_NUM_1) < 0)
+            ;
+            // debug_tcp_printf(sock, "Failed to send light command over UART\n");
+        else ;
+            // debug_tcp_printf(sock, "Sent light command\n");
     }
 }
 
@@ -246,6 +279,9 @@ void commandWriterTask(void *pvParameters) {
                 if (motion_frames > MOTION_CHANGE_FRAMES_THRESHOLD
                     && (current_state == State_Idle || current_state == State_Search)
                 ) {
+                    if (current_state == State_Idle)
+                        sendLightCommand(LASER_ON_COMMAND_ID);
+
                     set_state(State_Follow);
                     play_sound(Sound_I_See_You, false);
                 }
@@ -275,6 +311,13 @@ void commandWriterTask(void *pvParameters) {
         } else if (current_state == State_Search && now - state_change_time > SEARCH_TIMEOUT_US) {
             set_state(State_Idle);
             play_sound(Sound_Target_Lost, false);
+
+            sendLightCommand(LASER_OFF_COMMAND_ID);
+        }
+
+        send_light_notif_t light_notif;
+        if (xQueueReceive(light_queue, &light_notif, 0)) {
+            sendLightCommand(LIGHT_COMMAND_ID);
         }
     }
 }
@@ -307,6 +350,10 @@ void soundPlayerTask(void *pvParameters) {
             xQueueReceive(sound_queue, &notif, portMAX_DELAY);
             file = get_wav_handle(notif.sound);
             has_sound = true;
+            if (notif.sound == Sound_Fire) {
+                send_light_notif_t light_notif;
+                xQueueSend(light_queue, &light_notif, 0);
+            }
         }
 
         // stream bit here
@@ -316,7 +363,7 @@ void soundPlayerTask(void *pvParameters) {
         {
             uint16_t unscaled = buffer[i] | (buffer[i + 1] << 8U);
             int32_t sample = unscaled > 32767 ? (int32_t)unscaled - 65536 : unscaled;
-            int32_t scaled = sample * 20 /* TODO replace with sound volume */ / 100;
+            int32_t scaled = sample * current_volume * MAX_VOLUME * sound_volumes[notif.sound];
 
             // Clamp to int16_t range
             if (scaled > 32767)
@@ -331,6 +378,10 @@ void soundPlayerTask(void *pvParameters) {
         if (bytes_read == 0) {
             if (notif.loop) {
                 fseek(file, WAV_HEADER_SIZE, SEEK_SET);
+                if (notif.sound == Sound_Fire) {
+                    send_light_notif_t light_notif;
+                    xQueueSend(light_queue, &light_notif, 0);
+                }
                 continue;
             } else {
                 fclose(file);
@@ -489,7 +540,7 @@ void start_i2s(uint32_t sampleRate)
 }
 
 void app_main() {
-    ESP_ERROR_CHECK(debug_network_init());
+    // ESP_ERROR_CHECK(debug_network_init());
 
     start_uart();
     start_camera();
@@ -497,14 +548,15 @@ void app_main() {
     start_i2s(I2S_SAMPLE_RATE);
 
     sound_queue = xQueueCreate(4, sizeof(play_sound_notif_t));
+    light_queue = xQueueCreate(4, sizeof(send_light_notif_t));
 
-    while (sock < 0) {
-        sock = debug_tcp_connect();
-        if (sock < 0)
-            vTaskDelay(pdMS_TO_TICKS(2000));
-    }
+    // while (sock < 0) {
+    //     sock = debug_tcp_connect();
+    //     if (sock < 0)
+    //         vTaskDelay(pdMS_TO_TICKS(2000));
+    // }
 
-    // xTaskCreate(commandReaderTask, "command_reader", 4096, NULL, 5, NULL);
+    xTaskCreate(commandReaderTask, "command_reader", 4096, NULL, 5, NULL);
     xTaskCreate(commandWriterTask, "command_writer", 4096, NULL, 5, NULL);
     xTaskCreate(soundPlayerTask, "sound_player", 4096, NULL, 5, NULL);
 

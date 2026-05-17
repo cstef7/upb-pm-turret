@@ -11,9 +11,15 @@ constexpr uint16_t TOP_FOR_PRE_FREQ(unsigned prescaler, unsigned frequency)
 constexpr uint8_t PIN_PAN_SERVO = 9;
 constexpr uint8_t PIN_TILT_SERVO = 10;
 
-constexpr uint8_t PIN_LASER = 12;
+constexpr uint8_t PIN_LASER = 11;
+
+constexpr uint8_t PIN_RED = 3;
+constexpr uint8_t PIN_GREEN = 5;
+constexpr uint8_t PIN_BLUE = 6;
 
 constexpr uint16_t SERVO_FRAME_TOP = TOP_FOR_PRE_FREQ(8, 50);
+
+constexpr uint8_t VOLUME_PIN = A0;
 
 constexpr uint16_t usToOcr(uint16_t us)
 {
@@ -35,29 +41,85 @@ void setupTimer1()
   OCR1B = usToOcr(1500); // servo on pin 10
 }
 
-void setupTimer2()
+typedef struct rgb_t
 {
-  TCCR2A = 0;
-  TCCR2B = 0;
-  TCNT2 = 0;
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+} rgb_t;
 
-  // Timer interrupts every 1ms
-  TCCR2A = (1 << WGM21);              // CTC mode
-  TCCR2B = (1 << CS22) | (1 << CS21); // prescaler = 256
-  OCR2A = (F_CPU / 256 / 1000) - 1;   // 1ms at 16MHz
-  TIMSK2 = (1 << OCIE2A);             // Enable Timer2 compare interrupt
+rgb_t shoot_sequence[] = {
+    {255, 40, 8},
+    {190, 20, 0},
+    {60, 0, 0},
+    {0, 0, 0},
+};
+
+void set_rgb(rgb_t color)
+{
+  analogWrite(PIN_RED, color.r);
+  analogWrite(PIN_GREEN, color.g);
+  analogWrite(PIN_BLUE, color.b);
 }
 
-ISR(TIMER2_COMPA_vect)
+void set_rgb_lerp(rgb_t color1, rgb_t color2, float t)
 {
-  // Toggle laser pin every 500ms
-  static uint16_t counter = 0;
-  counter++;
-  if (counter >= 500)
+  uint8_t r = static_cast<uint8_t>(color1.r + t * (color2.r - color1.r));
+  uint8_t g = static_cast<uint8_t>(color1.g + t * (color2.g - color1.g));
+  uint8_t b = static_cast<uint8_t>(color1.b + t * (color2.b - color1.b));
+  set_rgb((rgb_t){r, g, b});
+}
+
+constexpr unsigned long SHOOT_DURATION_MS = 90;
+constexpr uint8_t SHOOT_REPEATS = 3;
+constexpr uint8_t SHOOT_STEPS = 3; // four lerp segments between five shoot colors
+
+struct shoot_state_t
+{
+  bool active;
+  unsigned long start_ms;
+  uint8_t repeats_left;
+};
+
+static shoot_state_t shoot_state = {false, 0, 0};
+
+void trigger_shoot_sequence()
+{
+  shoot_state.active = true;
+  shoot_state.start_ms = millis();
+  shoot_state.repeats_left = SHOOT_REPEATS;
+}
+
+bool update_shoot_sequence()
+{
+  if (!shoot_state.active)
+    return false;
+
+  unsigned long now = millis();
+  unsigned long elapsed = now - shoot_state.start_ms;
+
+  while (elapsed >= SHOOT_DURATION_MS && shoot_state.repeats_left > 1)
   {
-    digitalWrite(PIN_LASER, !digitalRead(PIN_LASER));
-    counter = 0;
+    elapsed -= SHOOT_DURATION_MS;
+    shoot_state.repeats_left--;
+    shoot_state.start_ms += SHOOT_DURATION_MS;
   }
+
+  if (elapsed >= SHOOT_DURATION_MS)
+  {
+    set_rgb((rgb_t){0, 0, 0});
+    shoot_state.active = false;
+    return false;
+  }
+
+  float scaled = static_cast<float>(elapsed) * SHOOT_STEPS / SHOOT_DURATION_MS;
+  int step = static_cast<int>(scaled);
+  if (step >= SHOOT_STEPS)
+    step = SHOOT_STEPS - 1;
+
+  float t = scaled - step;
+  set_rgb_lerp(shoot_sequence[step], shoot_sequence[step + 1], t);
+  return true;
 }
 
 void setup()
@@ -66,11 +128,13 @@ void setup()
   pinMode(PIN_PAN_SERVO, OUTPUT);
   pinMode(PIN_TILT_SERVO, OUTPUT);
   pinMode(PIN_LASER, OUTPUT);
+  pinMode(PIN_RED, OUTPUT);
+  pinMode(PIN_GREEN, OUTPUT);
+  pinMode(PIN_BLUE, OUTPUT);
 
   Serial.begin(115200);
 
   setupTimer1();
-  setupTimer2();
   sei();
 }
 
@@ -84,10 +148,8 @@ int serial_send_fn(uint8_t byte, void *ctx)
 // slip_recv_fn
 int serial_recv_fn(uint8_t *byte, void *ctx)
 {
-  while (Serial.available() == 0)
-  {
-    // wait for the next byte
-  }
+  if (Serial.available() <= 0)
+    return -1; // no data available
 
   int c = Serial.read();
   if (c < 0)
@@ -100,7 +162,7 @@ int serial_recv_fn(uint8_t *byte, void *ctx)
 void send_sound_command(float volume)
 {
   sound_message_t sound_msg;
-  sound_msg.command_id = 0x02; // Sound command
+  sound_msg.command_id = VOLUME_COMMAND_ID;
   sound_msg.volume = volume;
 
   uint8_t buffer[SOUND_MESSAGE_SIZE];
@@ -119,7 +181,7 @@ pan_tilt_t coords_to_pan_tilt(float x, float y)
 {
   pan_tilt_t result;
   // map x and y from 0-1 to 700-2300 for pan and 1400-2400 for tilt
-  result.pan = 700 + (1.0f - x) * (2300 - 700);
+  result.pan = 300 + (1.0f - x) * (2300 - 700);
   result.tilt = 1400 + (1.0f - y) * (2400 - 1400);
   return result;
 }
@@ -140,25 +202,54 @@ pan_tilt_t running_pan_tilt = {1500, 1900};
 
 void loop()
 {
-  // Read position message from UART
+  static slip_recv_state_t slip_recv_state = {0, false};
+  static float current_volume = 0.0f;
+
+  static float laserIntensity = 0.0f;
+  static float targetLaserIntensity = 0.0f;
+
   position_message_t pos_msg;
+  light_message_t light_msg;
   uint8_t buffer[POSITION_MESSAGE_SIZE];
   size_t bytes_read;
 
-  // Read into buffer, then read from buffer
-  if (recv_packet(buffer, sizeof(buffer), &bytes_read, serial_recv_fn, NULL) == 0 && bytes_read == POSITION_MESSAGE_SIZE)
+  if (recv_packet_step(buffer, sizeof(buffer), &bytes_read, &slip_recv_state, serial_recv_fn, NULL) == 0)
   {
-    if (message_read_position(buffer, sizeof(buffer), &pos_msg) == POSITION_MESSAGE_SIZE)
+    if (bytes_read == POSITION_MESSAGE_SIZE && message_read_position(buffer, sizeof(buffer), &pos_msg) == POSITION_MESSAGE_SIZE)
     {
-      // float volume = pos_msg.x + pos_msg.y;
-      // send_sound_command(volume);
-      // toggle led
-      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-
       pan_tilt_t pan_tilt = coords_to_pan_tilt(pos_msg.x, pos_msg.y);
       running_pan_tilt.pan = PAN_TILT_NEW_WEIGHT * pan_tilt.pan + (1.0f - PAN_TILT_NEW_WEIGHT) * running_pan_tilt.pan;
       running_pan_tilt.tilt = PAN_TILT_NEW_WEIGHT * pan_tilt.tilt + (1.0f - PAN_TILT_NEW_WEIGHT) * running_pan_tilt.tilt;
       set_pan_tilt(running_pan_tilt);
     }
+
+    if (bytes_read == LIGHT_MESSAGE_SIZE && message_read_light(buffer, sizeof(buffer), &light_msg) == LIGHT_MESSAGE_SIZE)
+    {
+      if (light_msg.command_id == LIGHT_COMMAND_ID)
+      {
+        trigger_shoot_sequence();
+      }
+      else if (light_msg.command_id == LASER_ON_COMMAND_ID)
+      {
+        targetLaserIntensity = 1.0f;
+      }
+      else if (light_msg.command_id == LASER_OFF_COMMAND_ID)
+      {
+        targetLaserIntensity = 0.0f;
+      }
+    }
   }
+
+  float volume = analogRead(VOLUME_PIN) / 1023.0f;
+  if (abs(volume - current_volume) > 0.01f)
+  {
+    current_volume = volume;
+    send_sound_command(current_volume);
+  }
+
+  update_shoot_sequence();
+
+  // Smoothly update laser intensity
+  laserIntensity += (targetLaserIntensity - laserIntensity) * 0.002f;
+  analogWrite(PIN_LASER, static_cast<uint8_t>(laserIntensity * 255));
 }
