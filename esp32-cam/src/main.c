@@ -1,21 +1,21 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "driver/uart.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "esp_spiffs.h"
+#include "esp_camera.h"
 #include "lwip/sockets.h"
 #include "driver/i2s.h"
 
 #include "debug.h"
 #include "messages.h"
 #include "slip.h"
-#include "esp_camera.h"
-#include <string.h>
 
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
@@ -36,7 +36,7 @@
 
 #define MOTION_CHANGE_FRAMES_THRESHOLD 3
 
-#define FRAME_WEIGHT 0.2f
+#define FRAME_WEIGHT 0.7f
 
 #define ms_to_us(ms) ((ms) * 1000)
 
@@ -245,9 +245,13 @@ void play_sound(sound_t sound, bool loop) {
     xQueueSend(sound_queue, &notif, 0);
 }
 
+#define NEW_CENTROID_WEIGHT 0.5f
+
 void commandWriterTask(void *pvParameters) {
     int motion_frames = 0;
     int no_motion_frames = 0;
+
+    static vec2_t running_centroid = {0.5f, 0.5f};
 
     while (1) {
         // debug_tcp_printf(sock, "Capturing frame %d...\n", frames_captured + 1);
@@ -273,7 +277,9 @@ void commandWriterTask(void *pvParameters) {
                 motion_frames++;
                 no_motion_frames = 0;
 
-                sendPositionCommand(centroid.x, centroid.y);
+                running_centroid.x = NEW_CENTROID_WEIGHT * centroid.x + (1.0f - NEW_CENTROID_WEIGHT) * running_centroid.x;
+                running_centroid.y = NEW_CENTROID_WEIGHT * centroid.y + (1.0f - NEW_CENTROID_WEIGHT) * running_centroid.y;
+                sendPositionCommand(running_centroid.x, running_centroid.y);
                 // debug_tcp_printf(sock, "Centroid of motion: (%.2f, %.2f)\n", centroid.x, centroid.y);
 
                 if (motion_frames > MOTION_CHANGE_FRAMES_THRESHOLD
@@ -312,6 +318,8 @@ void commandWriterTask(void *pvParameters) {
             set_state(State_Idle);
             play_sound(Sound_Target_Lost, false);
 
+            running_centroid = (vec2_t){0.5f, 0.5f};
+            sendPositionCommand(running_centroid.x, running_centroid.y);
             sendLightCommand(LASER_OFF_COMMAND_ID);
         }
 
@@ -356,7 +364,6 @@ void soundPlayerTask(void *pvParameters) {
             }
         }
 
-        // stream bit here
         size_t bytes_read = fread(buffer, 1, sizeof(buffer), file);
 
         for (size_t i = 0; i + 1 < bytes_read; i += 2)

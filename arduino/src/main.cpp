@@ -177,12 +177,16 @@ typedef struct pan_tilt_t
   float tilt;
 } pan_tilt_t;
 
+#define PICTURE_DISTANCE 0.3f
+
 pan_tilt_t coords_to_pan_tilt(float x, float y)
 {
+  float x_angle = atan2f(x - 0.5f, PICTURE_DISTANCE);
+  float y_angle = atan2f(y - 0.5f, PICTURE_DISTANCE);
+
   pan_tilt_t result;
-  // map x and y from 0-1 to 700-2300 for pan and 1400-2400 for tilt
-  result.pan = 300 + (1.0f - x) * (2300 - 700);
-  result.tilt = 1400 + (1.0f - y) * (2400 - 1400);
+  result.pan = 1000 - 600 * x_angle;
+  result.tilt = 1900 - 500 * y_angle;
   return result;
 }
 
@@ -195,10 +199,6 @@ void set_pan_tilt(pan_tilt_t pan_tilt)
   OCR1B = tilt;
   sei();
 }
-
-pan_tilt_t running_pan_tilt = {1500, 1900};
-
-#define PAN_TILT_NEW_WEIGHT 0.5f
 
 void loop()
 {
@@ -218,9 +218,7 @@ void loop()
     if (bytes_read == POSITION_MESSAGE_SIZE && message_read_position(buffer, sizeof(buffer), &pos_msg) == POSITION_MESSAGE_SIZE)
     {
       pan_tilt_t pan_tilt = coords_to_pan_tilt(pos_msg.x, pos_msg.y);
-      running_pan_tilt.pan = PAN_TILT_NEW_WEIGHT * pan_tilt.pan + (1.0f - PAN_TILT_NEW_WEIGHT) * running_pan_tilt.pan;
-      running_pan_tilt.tilt = PAN_TILT_NEW_WEIGHT * pan_tilt.tilt + (1.0f - PAN_TILT_NEW_WEIGHT) * running_pan_tilt.tilt;
-      set_pan_tilt(running_pan_tilt);
+      set_pan_tilt(pan_tilt);
     }
 
     if (bytes_read == LIGHT_MESSAGE_SIZE && message_read_light(buffer, sizeof(buffer), &light_msg) == LIGHT_MESSAGE_SIZE)
