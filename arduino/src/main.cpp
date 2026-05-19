@@ -185,7 +185,7 @@ pan_tilt_t coords_to_pan_tilt(float x, float y)
   float y_angle = atan2f(y - 0.5f, PICTURE_DISTANCE);
 
   pan_tilt_t result;
-  result.pan = 1000 - 600 * x_angle;
+  result.pan = 1000 - 400 * x_angle;
   result.tilt = 1900 - 500 * y_angle;
   return result;
 }
