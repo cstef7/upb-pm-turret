@@ -199,7 +199,7 @@ void analyze_frame(
         int index_y = 0;
         for (size_t i = 0; i < GRAYSCALE_BUFFER_SIZE; i++) {
             int diff = abs(frame_data[i] - background[index_y][index_x]);
-            if (diff > 10) {
+            if (diff > 15) {
                 diff_count += diff;
                 centroid_x += index_x * diff;
                 centroid_y += index_y * diff;
@@ -214,7 +214,7 @@ void analyze_frame(
                 index_y++;
             }
         }
-        if (diff_count > 100) {
+        if (diff_count > 120) {
             centroid_x /= diff_count * QQVGA_WIDTH;
             centroid_y /= diff_count * QQVGA_HEIGHT;
 
