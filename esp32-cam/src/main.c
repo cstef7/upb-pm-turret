@@ -36,7 +36,7 @@
 
 #define MOTION_CHANGE_FRAMES_THRESHOLD 3
 
-#define FRAME_WEIGHT 0.7f
+#define FRAME_WEIGHT 0.8f
 
 #define ms_to_us(ms) ((ms) * 1000)
 
@@ -176,11 +176,45 @@ void sendLightCommand(uint8_t command_id) {
 }
 
 uint8_t background[QQVGA_HEIGHT][QQVGA_WIDTH];
+uint8_t motion_mask1[QQVGA_HEIGHT][QQVGA_WIDTH];
+
 int frames_captured = 0;
 typedef struct vec2_t {
     float x;
     float y;
 } vec2_t;
+
+void mm_erosion(uint8_t input[QQVGA_HEIGHT][QQVGA_WIDTH], uint8_t output[QQVGA_HEIGHT][QQVGA_WIDTH]) {
+    for (int y = 1; y < QQVGA_HEIGHT - 1; y++) {
+        for (int x = 1; x < QQVGA_WIDTH - 1; x++) {
+            uint8_t min_val = 255;
+            for (int j = -1; j <= 1; j++) {
+                for (int i = -1; i <= 1; i++) {
+                    if (input[y + j][x + i] < min_val) {
+                        min_val = input[y + j][x + i];
+                    }
+                }
+            }
+            output[y][x] = min_val;
+        }
+    }
+}
+
+void mm_dilation(uint8_t input[QQVGA_HEIGHT][QQVGA_WIDTH], uint8_t output[QQVGA_HEIGHT][QQVGA_WIDTH]) {
+    for (int y = 1; y < QQVGA_HEIGHT - 1; y++) {
+        for (int x = 1; x < QQVGA_WIDTH - 1; x++) {
+            uint8_t max_val = 0;
+            for (int j = -1; j <= 1; j++) {
+                for (int i = -1; i <= 1; i++) {
+                    if (input[y + j][x + i] > max_val) {
+                        max_val = input[y + j][x + i];
+                    }
+                }
+            }
+            output[y][x] = max_val;
+        }
+    }
+}
 
 void analyze_frame(
     const uint8_t *frame_data,
@@ -199,10 +233,24 @@ void analyze_frame(
         int index_y = 0;
         for (size_t i = 0; i < GRAYSCALE_BUFFER_SIZE; i++) {
             int diff = abs(frame_data[i] - background[index_y][index_x]);
-            if (diff > 10) {
-                diff_count += diff;
-                centroid_x += index_x * diff;
-                centroid_y += index_y * diff;
+            motion_mask1[index_y][index_x] = diff > 8 ? diff : 0;
+
+            // Do erosion in-place
+            if (index_x >= 2 && index_y >= 2) {
+                uint8_t min_val = 255;
+                for (int j = -2; j <= 0; j++) {
+                    for (int i = -2; i <= 0; i++) {
+                        if (motion_mask1[index_y + j][index_x + i] < min_val) {
+                            min_val = motion_mask1[index_y + j][index_x + i];
+                        }
+                    }
+                }
+                
+                if (min_val) {
+                    centroid_x += index_x * motion_mask1[index_y][index_x];
+                    centroid_y += index_y * motion_mask1[index_y][index_x];
+                    diff_count += motion_mask1[index_y][index_x];
+                }
             }
 
             background[index_y][index_x] = (uint8_t)(FRAME_WEIGHT * frame_data[i]
@@ -214,7 +262,8 @@ void analyze_frame(
                 index_y++;
             }
         }
-        if (diff_count > 100) {
+
+        if (diff_count > 40) {
             centroid_x /= diff_count * QQVGA_WIDTH;
             centroid_y /= diff_count * QQVGA_HEIGHT;
 
@@ -245,7 +294,7 @@ void play_sound(sound_t sound, bool loop) {
     xQueueSend(sound_queue, &notif, 0);
 }
 
-#define NEW_CENTROID_WEIGHT 0.5f
+#define NEW_CENTROID_WEIGHT 0.3f
 
 void commandWriterTask(void *pvParameters) {
     int motion_frames = 0;
