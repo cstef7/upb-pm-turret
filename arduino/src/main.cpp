@@ -3,6 +3,8 @@
 #include "messages.h"
 #include "slip.h"
 
+#define COMMAND_READ_BUFSIZE 32
+
 constexpr uint16_t TOP_FOR_PRE_FREQ(unsigned prescaler, unsigned frequency)
 {
   return (F_CPU / prescaler / frequency) - 1;
@@ -72,7 +74,7 @@ void set_rgb_lerp(rgb_t color1, rgb_t color2, float t)
 
 constexpr unsigned long SHOOT_DURATION_MS = 90;
 constexpr uint8_t SHOOT_REPEATS = 3;
-constexpr uint8_t SHOOT_STEPS = 3; // four lerp segments between five shoot colors
+constexpr uint8_t SHOOT_STEPS = 3; // three lerp segments between four shoot colors
 
 struct shoot_state_t
 {
@@ -171,6 +173,20 @@ void send_sound_command(float volume)
   send_packet(buffer, sizeof(buffer), serial_send_fn, NULL);
 }
 
+void send_time_measurement(float capture_ms, float processing_ms, float servo_ms)
+{
+  time_measurement_message_t time_msg;
+  time_msg.command_id = TIME_MEASUREMENT_COMMAND_ID;
+  time_msg.capture_ms = capture_ms;
+  time_msg.processing_ms = processing_ms;
+  time_msg.servo_ms = servo_ms;
+
+  uint8_t buffer[TIME_MEASUREMENT_MESSAGE_SIZE];
+  message_write_time_measurement(buffer, sizeof(buffer), &time_msg);
+
+  send_packet(buffer, sizeof(buffer), serial_send_fn, NULL);
+}
+
 typedef struct pan_tilt_t
 {
   float pan;
@@ -208,9 +224,14 @@ void loop()
   static float laserIntensity = 0.0f;
   static float targetLaserIntensity = 0.0f;
 
+  static bool has_time_message = false;
+  static float capture_time_ms = 0.0f;
+  static float processing_time_ms = 0.0f;
+  static float time_measurement_local_ms = 0.0f;
+
   position_message_t pos_msg;
   light_message_t light_msg;
-  uint8_t buffer[POSITION_MESSAGE_SIZE];
+  uint8_t buffer[COMMAND_READ_BUFSIZE];
   size_t bytes_read;
 
   if (recv_packet_step(buffer, sizeof(buffer), &bytes_read, &slip_recv_state, serial_recv_fn, NULL) == 0)
@@ -219,6 +240,14 @@ void loop()
     {
       pan_tilt_t pan_tilt = coords_to_pan_tilt(pos_msg.x, pos_msg.y);
       set_pan_tilt(pan_tilt);
+
+      if (has_time_message)
+      {
+        unsigned long now = millis();
+        float servo_time_ms = now - time_measurement_local_ms;
+        send_time_measurement(capture_time_ms, processing_time_ms, servo_time_ms);
+        has_time_message = false;
+      }
     }
 
     if (bytes_read == LIGHT_MESSAGE_SIZE && message_read_light(buffer, sizeof(buffer), &light_msg) == LIGHT_MESSAGE_SIZE)
@@ -236,10 +265,22 @@ void loop()
         targetLaserIntensity = 0.0f;
       }
     }
+
+    if (bytes_read == TIME_MEASUREMENT_MESSAGE_SIZE)
+    {
+      time_measurement_message_t time_msg;
+      if (message_read_time_measurement(buffer, sizeof(buffer), &time_msg) == TIME_MEASUREMENT_MESSAGE_SIZE)
+      {
+        has_time_message = true;
+        capture_time_ms = time_msg.capture_ms;
+        processing_time_ms = time_msg.processing_ms;
+        time_measurement_local_ms = millis();
+      }
+    }
   }
 
   float volume = analogRead(VOLUME_PIN) / 1023.0f;
-  if (abs(volume - current_volume) > 0.01f)
+  if (fabsf(volume - current_volume) > 0.01f)
   {
     current_volume = volume;
     send_sound_command(current_volume);

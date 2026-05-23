@@ -4,6 +4,12 @@
 #include <stddef.h>
 #include "esp_err.h"
 
+#ifdef ENABLE_DEBUG_LOGS
+    #define DBG_PRINTF(...) debug_tcp_printf(__VA_ARGS__)
+#else
+    #define DBG_PRINTF(...) do {} while(0)
+#endif
+
 esp_err_t debug_network_init(void);
 int debug_tcp_connect(void);
 int debug_tcp_send(int sock, const void *data, size_t len);

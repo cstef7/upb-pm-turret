@@ -96,3 +96,35 @@ int message_read_light(const uint8_t *buffer, size_t len, light_message_t *msg) 
 
     return LIGHT_MESSAGE_SIZE;
 }
+
+
+int message_write_time_measurement(uint8_t *buffer, size_t max_len, const time_measurement_message_t *msg) {
+    if (!buffer || !msg || max_len < TIME_MEASUREMENT_MESSAGE_SIZE)
+        return -1;
+
+    buffer[0] = msg->command_id;
+    memcpy(&buffer[1], &msg->capture_ms, sizeof(float));
+    memcpy(&buffer[5], &msg->processing_ms, sizeof(float));
+    memcpy(&buffer[9], &msg->servo_ms, sizeof(float));
+    buffer[TIME_MEASUREMENT_MESSAGE_SIZE - 1] = crc8_compute(buffer, TIME_MEASUREMENT_MESSAGE_SIZE - 1);
+
+    return TIME_MEASUREMENT_MESSAGE_SIZE;
+}
+
+int message_read_time_measurement(const uint8_t *buffer, size_t len, time_measurement_message_t *msg) {
+    if (!buffer || !msg || len < TIME_MEASUREMENT_MESSAGE_SIZE)
+        return -1;
+
+    if (crc8_compute(buffer, TIME_MEASUREMENT_MESSAGE_SIZE - 1) != buffer[TIME_MEASUREMENT_MESSAGE_SIZE - 1])
+        return -1;
+
+    if (buffer[0] != TIME_MEASUREMENT_COMMAND_ID)
+        return -1;
+
+    msg->command_id = buffer[0];
+    memcpy(&msg->capture_ms, &buffer[1], sizeof(float));
+    memcpy(&msg->processing_ms, &buffer[5], sizeof(float));
+    memcpy(&msg->servo_ms, &buffer[9], sizeof(float));
+
+    return TIME_MEASUREMENT_MESSAGE_SIZE;
+}
