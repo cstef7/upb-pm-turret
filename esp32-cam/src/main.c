@@ -280,7 +280,9 @@ static void commandWriterTask(void *pvParameters) {
             continue;
         }
 
+#ifdef ENABLE_DEBUG_LOGS
         float capture_time_ms = (esp_timer_get_time() - start_time) / 1000.0f;
+#endif
 
         if (fb->len == GRAYSCALE_BUFFER_SIZE) {
             bool motion_detected = false;
@@ -291,8 +293,10 @@ static void commandWriterTask(void *pvParameters) {
                 motion_frames++;
                 no_motion_frames = 0;
 
+#ifdef ENABLE_DEBUG_LOGS
                 float processing_time_ms = (esp_timer_get_time() - start_time) / 1000.0f - capture_time_ms;
                 sendTimeMeasurementCommand(capture_time_ms, processing_time_ms, 0.0f);
+#endif
 
                 running_centroid.x = NEW_CENTROID_WEIGHT * centroid.x + (1.0f - NEW_CENTROID_WEIGHT) * running_centroid.x;
                 running_centroid.y = NEW_CENTROID_WEIGHT * centroid.y + (1.0f - NEW_CENTROID_WEIGHT) * running_centroid.y;
