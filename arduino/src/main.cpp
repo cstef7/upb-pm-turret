@@ -34,13 +34,13 @@ void setupTimer1()
   TCCR1B = 0;
   TCNT1 = 0;
 
+  ICR1 = SERVO_FRAME_TOP;
+  OCR1A = usToOcr(750);  // servo on pin 9
+  OCR1B = usToOcr(1550); // servo on pin 10
+
   // Fast PWM, TOP = ICR1 (mode 14)
   TCCR1A = (1 << COM1A1) | (1 << COM1B1) | (1 << WGM11);
   TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11); // prescaler = 8
-
-  ICR1 = SERVO_FRAME_TOP;
-  OCR1A = usToOcr(1500); // servo on pin 9
-  OCR1B = usToOcr(1500); // servo on pin 10
 }
 
 typedef struct rgb_t
@@ -59,9 +59,9 @@ rgb_t shoot_sequence[] = {
 
 void set_rgb(rgb_t color)
 {
-  analogWrite(PIN_RED, color.r);
-  analogWrite(PIN_GREEN, color.g);
-  analogWrite(PIN_BLUE, color.b);
+  analogWrite(PIN_RED, 255 - color.r);
+  analogWrite(PIN_GREEN, 255 - color.g);
+  analogWrite(PIN_BLUE, 255 - color.b);
 }
 
 void set_rgb_lerp(rgb_t color1, rgb_t color2, float t)
@@ -124,22 +124,6 @@ bool update_shoot_sequence()
   return true;
 }
 
-void setup()
-{
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(PIN_PAN_SERVO, OUTPUT);
-  pinMode(PIN_TILT_SERVO, OUTPUT);
-  pinMode(PIN_LASER, OUTPUT);
-  pinMode(PIN_RED, OUTPUT);
-  pinMode(PIN_GREEN, OUTPUT);
-  pinMode(PIN_BLUE, OUTPUT);
-
-  Serial.begin(115200);
-
-  setupTimer1();
-  sei();
-}
-
 // slip_send_fn
 int serial_send_fn(uint8_t byte, void *ctx)
 {
@@ -195,14 +179,40 @@ typedef struct pan_tilt_t
 
 #define PICTURE_DISTANCE 0.3f
 
+constexpr float cx = 0.5f;
+constexpr float cy = 0.5f;
+constexpr float x_radius = 0.1f;
+constexpr float y_radius = 0.16f;
+
+void clampToEllipse(float &x, float &y)
+{
+  float dx = x - cx;
+  float dy = y - cy;
+
+  // ellipse equation value
+  float v = (dx * dx) / (x_radius * x_radius) + (dy * dy) / (y_radius * y_radius);
+
+  // already inside
+  if (v <= 1.0f)
+    return;
+
+  // scale factor to project onto ellipse boundary
+  float scale = 1.0f / sqrtf(v);
+
+  x = cx + dx * scale;
+  y = cy + dy * scale;
+}
+
 pan_tilt_t coords_to_pan_tilt(float x, float y)
 {
+  clampToEllipse(x, y);
+
   float x_angle = atan2f(x - 0.5f, PICTURE_DISTANCE);
   float y_angle = atan2f(y - 0.5f, PICTURE_DISTANCE);
 
   pan_tilt_t result;
-  result.pan = 1000 - 400 * x_angle;
-  result.tilt = 1900 - 500 * y_angle;
+  result.pan = 950 - 400 * x_angle;
+  result.tilt = 1800 - 500 * y_angle;
   return result;
 }
 
@@ -213,6 +223,29 @@ void set_pan_tilt(pan_tilt_t pan_tilt)
   cli();
   OCR1A = pan;
   OCR1B = tilt;
+  sei();
+}
+
+void setup()
+{
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(PIN_PAN_SERVO, OUTPUT);
+  pinMode(PIN_TILT_SERVO, OUTPUT);
+  pinMode(PIN_LASER, OUTPUT);
+  pinMode(PIN_RED, OUTPUT);
+  pinMode(PIN_GREEN, OUTPUT);
+  pinMode(PIN_BLUE, OUTPUT);
+
+  set_rgb((rgb_t){0, 0, 0});
+
+  Serial.begin(115200);
+
+  digitalWrite(PIN_PAN_SERVO, LOW);
+  digitalWrite(PIN_TILT_SERVO, LOW);
+
+  setupTimer1();
+  set_pan_tilt(coords_to_pan_tilt(0.5f, 0.5f));
+
   sei();
 }
 

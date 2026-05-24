@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "driver/uart.h"
@@ -47,6 +48,9 @@
 
 #define FOLLOW_TIMEOUT_US ms_to_us(3000)
 #define SEARCH_TIMEOUT_US ms_to_us(3000)
+
+#define VISION_BOX_X 0.15f
+#define VISION_BOX_Y 0.2f
 
 #define MAX_VOLUME .2f
 
@@ -232,9 +236,13 @@ static void analyze_frame(
                 index_y++;
             }
         }
-        if (diff_count > MOTION_SCORE_THRESHOLD) {
-            centroid_x /= diff_count * QQVGA_WIDTH;
-            centroid_y /= diff_count * QQVGA_HEIGHT;
+
+        centroid_x /= diff_count * QQVGA_WIDTH;
+        centroid_y /= diff_count * QQVGA_HEIGHT;
+        float centroid_x_off = fabsf(centroid_x - 0.5f);
+        float centroid_y_off = fabsf(centroid_y - 0.5f);
+
+        if (diff_count > MOTION_SCORE_THRESHOLD && centroid_x_off < VISION_BOX_X && centroid_y_off < VISION_BOX_Y) {
 
             *motion = true;
             centroid->x = centroid_x;
