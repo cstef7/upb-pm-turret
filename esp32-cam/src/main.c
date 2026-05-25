@@ -220,6 +220,11 @@ static void analyze_frame(
         int index_x = 0;
         int index_y = 0;
         for (size_t i = 0; i < GRAYSCALE_BUFFER_SIZE; i++) {
+            int index_x_off = abs(index_x - QQVGA_WIDTH / 2);
+            int index_y_off = abs(index_y - QQVGA_HEIGHT / 2);
+            if (index_x_off > VISION_BOX_X * QQVGA_WIDTH || index_y_off > VISION_BOX_Y * QQVGA_HEIGHT)
+                goto skip_pixel;
+
             int diff = abs(frame_data[i] - background[index_y][index_x]);
             if (diff > PIXEL_DIFF_THRESHOLD) {
                 diff_count += diff;
@@ -230,6 +235,7 @@ static void analyze_frame(
             background[index_y][index_x] = (uint8_t)(FRAME_WEIGHT * frame_data[i]
                 + (1.0f - FRAME_WEIGHT) * background[index_y][index_x]);
 
+                
             index_x++;
             if (index_x >= QQVGA_WIDTH) {
                 index_x = 0;
@@ -237,12 +243,9 @@ static void analyze_frame(
             }
         }
 
-        centroid_x /= diff_count * QQVGA_WIDTH;
-        centroid_y /= diff_count * QQVGA_HEIGHT;
-        float centroid_x_off = fabsf(centroid_x - 0.5f);
-        float centroid_y_off = fabsf(centroid_y - 0.5f);
-
         if (diff_count > MOTION_SCORE_THRESHOLD && centroid_x_off < VISION_BOX_X && centroid_y_off < VISION_BOX_Y) {
+            centroid_x /= diff_count * QQVGA_WIDTH;
+            centroid_y /= diff_count * QQVGA_HEIGHT;
 
             *motion = true;
             centroid->x = centroid_x;
